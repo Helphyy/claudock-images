@@ -1,6 +1,10 @@
 VERSION    ?= latest
 GHCR_NS    ?= ghcr.io/helphyy
 
+# Cache-bust passé à Dockerfile.minimal pour forcer la récupération de la
+# dernière version de Claude Code à chaque `make build-*`.
+CACHEBUST  := $(shell date +%s)
+
 MINIMAL_IMAGE  := claudock-minimal:$(VERSION)
 DEV_IMAGE      := claudock-dev:$(VERSION)
 CLOUD_IMAGE    := claudock-cloud:$(VERSION)
@@ -40,7 +44,7 @@ help:
 	@echo "  clean             Remove local image tags"
 
 build-minimal:
-	docker build -t $(MINIMAL_IMAGE) -f Dockerfile.minimal .
+	docker build -t $(MINIMAL_IMAGE) -f Dockerfile.minimal --build-arg CACHEBUST=$(CACHEBUST) .
 
 build-dev: build-minimal
 	docker build -t $(DEV_IMAGE) -f Dockerfile.dev --build-arg BASE_IMAGE=$(MINIMAL_IMAGE) .

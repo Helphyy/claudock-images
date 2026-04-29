@@ -86,8 +86,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 
 # === Layer min-2: Claude Code (native binary) =================================
-ARG CLAUDE_VERSION=2.1.123
-RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
+# CLAUDE_VERSION accepte: stable, latest, ou un numéro X.Y.Z. Default = latest
+# (la dernière publiée). CACHEBUST est passé par le Makefile à chaque build pour
+# forcer Docker à ré-exécuter cette couche et récupérer la version courante.
+ARG CLAUDE_VERSION=latest
+ARG CACHEBUST=0
+RUN echo "cachebust=${CACHEBUST}" \
+    && curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
     && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
     && claude --version
 
