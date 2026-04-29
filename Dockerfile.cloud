@@ -1,0 +1,242 @@
+# claudock-cloud: claudock-minimal extended with cloud / IaC / orchestration.
+# Privileges official apt repositories whenever they exist, falls back to
+# vendor binaries only for tools that don't ship an apt repo.
+ARG BASE_IMAGE=claudock-minimal:dev
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# === Layer cloud-base: prerequisites (Python, pipx, unzip) ===================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip \
+        python3 \
+        python3-venv \
+        python3-pip \
+        pipx \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Layer cloud-repos: register every official apt repo we'll use ===========
+ARG K8S_MINOR=v1.34
+
+RUN install -d /etc/apt/keyrings && \
+    DEBIAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME") && \
+    # HashiCorp (terraform, vault, consul, nomad, packer)
+    curl -fsSL https://apt.releases.hashicorp.com/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com ${DEBIAN_CODENAME} main" \
+        > /etc/apt/sources.list.d/hashicorp.list && \
+    # Kubernetes (kubectl)
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/deb/Release.key" \
+        | gpg --dearmor -o /etc/apt/keyrings/kubernetes.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/deb/ /" \
+        > /etc/apt/sources.list.d/kubernetes.list && \
+    # Trivy (Aqua Security)
+    curl -fsSL https://aquasecurity.github.io/trivy-repo/deb/public.key \
+        | gpg --dearmor -o /etc/apt/keyrings/trivy.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb ${DEBIAN_CODENAME} main" \
+        > /etc/apt/sources.list.d/trivy.list && \
+    # Google Cloud SDK
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/google-cloud.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/google-cloud.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list
+
+# === Layer cloud-apt: bulk install from the registered repos ================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        # HashiCorp
+        terraform \
+        vault \
+        consul \
+        nomad \
+        packer \
+        # Kubernetes
+        kubectl \
+        # IaC + container security scanning
+        trivy \
+        # Google Cloud
+        google-cloud-cli \
+        # Secrets / encryption (also handy outside cloud)
+        age \
+        # Automation
+        ansible \
+        # Container image utilities
+        skopeo \
+    && rm -rf /var/lib/apt/lists/* \
+    # HashiCorp 2.x binaries ship with file capabilities (cap_ipc_lock for vault,
+    # etc.). The kernel refuses to exec them when the container's bounding caps
+    # don't include them (Docker default). Strip the file caps so they run
+    # without --privileged. Vault loses mlock(), acceptable for dev.
+    && for b in vault consul nomad; do \
+         setcap -r "/usr/bin/$b" 2>/dev/null || true ; \
+       done
+
+# === Layer cloud-azure: Azure CLI (official Microsoft installer) =============
+RUN curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Layer cloud-aws: AWS CLI v2 (zip from awscli.amazonaws.com) ============
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/aws.zip \
+    && unzip -q /tmp/aws.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/aws.zip
+
+# === Layer cloud-oc: OpenShift CLI ==========================================
+RUN curl -fsSL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
+        | tar xz -C /tmp oc \
+    && mv /tmp/oc /usr/local/bin/oc
+
+# === Layer cloud-bin: tools without an official apt repo ====================
+ARG OPENTOFU_VERSION=1.11.6
+ARG TFLINT_VERSION=0.62.0
+ARG SOPS_VERSION=3.12.2
+ARG FLUX_VERSION=2.8.6
+ARG KIND_VERSION=0.31.0
+ARG K3D_VERSION=5.8.3
+ARG ARGOCD_VERSION=3.3.8
+ARG K9S_VERSION=v0.32.7
+ARG KUBECTX_VERSION=v0.9.5
+ARG STERN_VERSION=1.31.0
+ARG CRANE_VERSION=0.21.5
+ARG PLUTO_VERSION=5.24.0
+ARG HELM_VERSION=4.1.4
+
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+         amd64) X64="x86_64" ;; \
+         arm64) X64="arm64"  ;; \
+       esac \
+    # helm (CDN baltocdn was unreliable; get.helm.sh is the official tarball mirror)
+    && curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+        -o /tmp/helm.tgz \
+    && tar xzf /tmp/helm.tgz -C /tmp \
+    && mv /tmp/linux-${ARCH}/helm /usr/local/bin/helm \
+    && rm -rf /tmp/helm.tgz /tmp/linux-${ARCH} \
+    # k9s
+    && curl -fsSL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin k9s \
+    # kubectx + kubens (asset names always use x86_64 even on amd64)
+    && curl -fsSL "https://github.com/ahmetb/kubectx/releases/download/${KUBECTX_VERSION}/kubectx_${KUBECTX_VERSION}_linux_x86_64.tar.gz" \
+        | tar xz -C /usr/local/bin kubectx \
+    && curl -fsSL "https://github.com/ahmetb/kubectx/releases/download/${KUBECTX_VERSION}/kubens_${KUBECTX_VERSION}_linux_x86_64.tar.gz" \
+        | tar xz -C /usr/local/bin kubens \
+    # stern (multi-pod log tail)
+    && curl -fsSL "https://github.com/stern/stern/releases/download/v${STERN_VERSION}/stern_${STERN_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin stern \
+    # kustomize
+    && curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" \
+        | bash -s -- "" /usr/local/bin \
+    # opentofu
+    && curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${OPENTOFU_VERSION}/tofu_${OPENTOFU_VERSION}_linux_${ARCH}.zip" \
+        -o /tmp/tofu.zip \
+    && unzip -o /tmp/tofu.zip -d /usr/local/bin tofu \
+    && rm /tmp/tofu.zip \
+    # tflint
+    && curl -fsSL "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}/tflint_linux_${ARCH}.zip" \
+        -o /tmp/tflint.zip \
+    && unzip -o /tmp/tflint.zip -d /usr/local/bin tflint \
+    && rm /tmp/tflint.zip \
+    # sops
+    && curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${ARCH}" \
+        -o /usr/local/bin/sops \
+    && chmod +x /usr/local/bin/sops \
+    # flux
+    && curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin flux \
+    # kind
+    && curl -fsSL "https://kind.sigs.k8s.io/dl/v${KIND_VERSION}/kind-linux-${ARCH}" \
+        -o /usr/local/bin/kind \
+    && chmod +x /usr/local/bin/kind \
+    # k3d (install script)
+    && curl -fsSL "https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh" \
+        | TAG=v${K3D_VERSION} bash \
+    # argocd
+    && curl -fsSL "https://github.com/argoproj/argo-cd/releases/download/v${ARGOCD_VERSION}/argocd-linux-${ARCH}" \
+        -o /usr/local/bin/argocd \
+    && chmod +x /usr/local/bin/argocd \
+    # crane (go-containerregistry; tar uses x86_64 / arm64)
+    && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${X64}.tar.gz" \
+        | tar xz -C /usr/local/bin crane \
+    # pluto (find deprecated k8s API versions)
+    && curl -fsSL "https://github.com/FairwindsOps/pluto/releases/download/v${PLUTO_VERSION}/pluto_${PLUTO_VERSION}_linux_${ARCH}.tar.gz" \
+        -o /tmp/pluto.tar.gz \
+    && mkdir /tmp/pluto && tar xzf /tmp/pluto.tar.gz -C /tmp/pluto \
+    && mv /tmp/pluto/pluto /usr/local/bin/pluto \
+    && rm -rf /tmp/pluto /tmp/pluto.tar.gz
+
+# === Layer cloud-dive: Docker image analyzer (uses .deb release) ============
+ARG DIVE_VERSION=0.13.1
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/wagoodman/dive/releases/download/v${DIVE_VERSION}/dive_${DIVE_VERSION}_linux_${ARCH}.deb" \
+        -o /tmp/dive.deb \
+    && dpkg -i /tmp/dive.deb \
+    && rm /tmp/dive.deb
+
+# === Layer cloud-yq: yq (Go binary by mikefarah, NOT the legacy Python apt) ==
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" \
+        -o /usr/local/bin/yq \
+    && chmod +x /usr/local/bin/yq
+
+# === Layer cloud-krew: kubectl plugin manager + kubectl-tree ================
+ARG KREW_VERSION=0.5.0
+RUN ARCH=$(dpkg --print-architecture) \
+    && cd /tmp \
+    && curl -fsSL "https://github.com/kubernetes-sigs/krew/releases/download/v${KREW_VERSION}/krew-linux_${ARCH}.tar.gz" \
+        -o /tmp/krew.tar.gz \
+    && tar xzf /tmp/krew.tar.gz \
+    && ./krew-linux_${ARCH} install krew \
+    && rm /tmp/krew-linux_${ARCH} /tmp/krew.tar.gz /tmp/LICENSE 2>/dev/null || true \
+    && PATH="/root/.krew/bin:$PATH" kubectl krew install tree
+ENV PATH=/root/.krew/bin:$PATH
+
+# === Layer cloud-vscode: cloud-flavored extensions ==========================
+RUN for ext in \
+        hashicorp.terraform \
+        ms-azuretools.vscode-docker \
+        ms-azuretools.vscode-containers \
+        ms-kubernetes-tools.vscode-kubernetes-tools \
+        redhat.ansible \
+        redhat.vscode-yaml \
+        humao.rest-client \
+    ; do \
+        code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
+    done
+
+# === Layer cloud-docker: Docker CLI (talks to host daemon via --docker) =====
+# Idempotent (when stacked on top of an image that already has docker keyring,
+# e.g. claudock-dev for the full variant). Stdout redirect skips the gpg TTY
+# overwrite prompt; apt-get install is a no-op if docker-ce-cli is present.
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor > /etc/apt/keyrings/docker.gpg \
+    && chmod go+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Final cleanup ===========================================================
+RUN rm -rf \
+        /root/.claude.json \
+        /root/.claude/backups \
+        /root/.claude/downloads \
+        /root/.cache/pip \
+        /root/.cache/pipx \
+        /root/.local/share/pipx/cache \
+        /root/.config/packer \
+        /root/.terraform.d \
+        /root/.config/code-server/config.yaml \
+        /root/.local/share/code-server/logs \
+        /root/.local/share/code-server/CachedExtensionVSIXs \
+        /root/.bash_history \
+        /root/.zsh_history \
+        /tmp/* \
+        /var/tmp/* \
+        /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+    2>/dev/null || true
+
+WORKDIR /workspace

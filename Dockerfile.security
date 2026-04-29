@@ -1,0 +1,277 @@
+# claudock-security: claudock-minimal extended with audit / pentest tooling.
+# Curated subset for code audit + light pentest. Lighter than Exegol; meant
+# for AI-driven audits with Claude. Use only on systems you are authorized
+# to test.
+ARG BASE_IMAGE=claudock-minimal:dev
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# === Layer sec-1: network reconnaissance ======================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nmap \
+        ncat \
+        masscan \
+        netcat-openbsd \
+        socat \
+        tcpdump \
+        traceroute \
+        whois \
+        dnsutils \
+        ldnsutils \
+        smbclient \
+        snmp \
+        hping3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Layer sec-2: web audit ===================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nikto \
+        sqlmap \
+        wfuzz \
+        whatweb \
+        dirb \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GOBUSTER_VERSION=3.8.2
+ARG FFUF_VERSION=2.1.0
+RUN ARCH_DEB=$(dpkg --print-architecture) \
+    && case "$ARCH_DEB" in \
+         amd64) GH_ARCH="x86_64" ;; \
+         arm64) GH_ARCH="arm64" ;; \
+         *)     GH_ARCH="$ARCH_DEB" ;; \
+       esac \
+    && curl -fsSL "https://github.com/OJ/gobuster/releases/download/v${GOBUSTER_VERSION}/gobuster_Linux_${GH_ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin gobuster \
+    && curl -fsSL "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_${ARCH_DEB}.tar.gz" \
+        | tar xz -C /usr/local/bin ffuf
+
+# === Layer sec-3: passwords / hashes ==========================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        hashcat \
+        john \
+        hydra \
+        cewl \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Layer sec-4: reverse engineering / forensics =============================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gdb \
+        binwalk \
+        libimage-exiftool-perl \
+        foremost \
+        steghide \
+        ltrace \
+        strace \
+        file \
+        xxd \
+        hexedit \
+        upx-ucl \
+        apktool \
+        yara \
+    && rm -rf /var/lib/apt/lists/*
+
+# radare2 from official .deb (not in Debian trixie main)
+ARG RADARE2_VERSION=5.9.8
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/radareorg/radare2/releases/download/${RADARE2_VERSION}/radare2_${RADARE2_VERSION}_${ARCH}.deb" \
+        -o /tmp/r2.deb \
+    && (dpkg -i /tmp/r2.deb || apt-get -f install -y --no-install-recommends) \
+    && rm /tmp/r2.deb \
+    || echo "WARN: radare2 install failed (continuing)"
+
+# === Layer sec-5: code audit + host hardening =================================
+# tshark is non-interactive: preseed the "non-superuser capture" question.
+RUN echo "wireshark-common wireshark-common/install-setuid boolean false" | debconf-set-selections \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        shellcheck \
+        cppcheck \
+        lynis \
+        chkrootkit \
+        tshark \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Layer sec-6: crypto / TLS ================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssl \
+        gnutls-bin \
+        sslscan \
+        testssl.sh \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/testssl /usr/local/bin/testssl.sh
+
+# === Layer sec-7: Python audit toolkit (pipx) ================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
+        python3-pip \
+        pipx \
+    && rm -rf /var/lib/apt/lists/* \
+    && pipx install impacket || true \
+    && pipx install scapy || true \
+    && pipx install semgrep || true \
+    && pipx install wapiti3 || true \
+    && pipx install pwntools || true \
+    && pipx install responder || true \
+    && pipx install netexec || true \
+    && pipx install hashid || true \
+    && pipx install arsenal-cli || true \
+    # Code audit
+    && pipx install bandit || true \
+    && pipx install safety || true \
+    && pipx install pip-audit || true \
+    && pipx install detect-secrets || true \
+    # Memory forensics
+    && pipx install volatility3 || true \
+    # Modern OSINT recon
+    && pipx install bbot || true \
+    # Expose impacket scripts (loose .py files, not declared as console_scripts)
+    && if [ -d /root/.local/share/pipx/venvs/impacket/bin ]; then \
+        for f in /root/.local/share/pipx/venvs/impacket/bin/*.py; do \
+            n=$(basename "$f" .py) ; \
+            ln -sf "$f" "/usr/local/bin/$n" ; \
+        done ; \
+    fi
+
+# === Layer sec-bin: modern web pentest tooling (binaries from GH) ============
+ARG NUCLEI_VERSION=3.8.0
+ARG SUBFINDER_VERSION=2.14.0
+ARG HTTPX_PD_VERSION=1.9.0
+ARG KATANA_VERSION=1.5.0
+ARG FEROXBUSTER_VERSION=2.13.1
+ARG AMASS_VERSION=5.1.1
+ARG WAYBACKURLS_VERSION=0.1.0
+ARG GAU_VERSION=2.2.4
+ARG MKCERT_VERSION=1.4.4
+
+RUN ARCH=$(dpkg --print-architecture) \
+    && apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/* \
+    # ProjectDiscovery: nuclei, subfinder, httpx, katana (zips)
+    && for tool_v in "nuclei ${NUCLEI_VERSION}" "subfinder ${SUBFINDER_VERSION}" "httpx ${HTTPX_PD_VERSION}" "katana ${KATANA_VERSION}" ; do \
+         set -- $tool_v ; tool=$1 ; ver=$2 ; \
+         curl -fsSL "https://github.com/projectdiscovery/${tool}/releases/download/v${ver}/${tool}_${ver}_linux_${ARCH}.zip" -o /tmp/${tool}.zip ; \
+         unzip -o /tmp/${tool}.zip -d /usr/local/bin ${tool} ; \
+         rm /tmp/${tool}.zip ; \
+       done \
+    # Rename PD's httpx → httpx-pd (Python httpx may be installed elsewhere)
+    && mv /usr/local/bin/httpx /usr/local/bin/httpx-pd \
+    # feroxbuster (.deb wrapped in .zip)
+    && curl -fsSL "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/feroxbuster_${ARCH}.deb.zip" \
+        -o /tmp/feroxbuster.zip \
+    && unzip -o /tmp/feroxbuster.zip -d /tmp \
+    && (dpkg -i /tmp/feroxbuster_*.deb || apt-get -f install -y --no-install-recommends) \
+    && rm -f /tmp/feroxbuster.zip /tmp/feroxbuster_*.deb \
+    # amass (subdomain enum, OWASP)
+    && curl -fsSL "https://github.com/owasp-amass/amass/releases/download/v${AMASS_VERSION}/amass_linux_${ARCH}.tar.gz" \
+        -o /tmp/amass.tar.gz \
+    && mkdir /tmp/amass && tar xzf /tmp/amass.tar.gz -C /tmp/amass --strip-components=1 \
+    && mv /tmp/amass/amass /usr/local/bin/amass \
+    && rm -rf /tmp/amass /tmp/amass.tar.gz \
+    # waybackurls (Tomnomnom)
+    && curl -fsSL "https://github.com/tomnomnom/waybackurls/releases/download/v${WAYBACKURLS_VERSION}/waybackurls-linux-${ARCH}-${WAYBACKURLS_VERSION}.tgz" \
+        | tar xz -C /usr/local/bin waybackurls \
+    # gau (lc)
+    && curl -fsSL "https://github.com/lc/gau/releases/download/v${GAU_VERSION}/gau_${GAU_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin gau \
+    # mkcert (single binary)
+    && curl -fsSL "https://github.com/FiloSottile/mkcert/releases/download/v${MKCERT_VERSION}/mkcert-v${MKCERT_VERSION}-linux-${ARCH}" \
+        -o /usr/local/bin/mkcert \
+    && chmod +x /usr/local/bin/mkcert
+
+# Pre-fetch nuclei templates (~50 MB, gain time on first scan)
+RUN nuclei -update-templates -silent || true
+
+# === Layer sec-audit: code audit binaries (secrets, SBOM, vuln, SAST) ========
+ARG GITLEAKS_VERSION=8.30.1
+ARG TRUFFLEHOG_VERSION=3.95.2
+ARG HADOLINT_VERSION=2.14.0
+ARG DOCKLE_VERSION=0.4.15
+ARG SYFT_VERSION=1.43.0
+ARG GRYPE_VERSION=0.111.1
+ARG OSV_SCANNER_VERSION=2.3.5
+ARG BEARER_VERSION=2.0.1
+ARG GOSEC_VERSION=2.26.1
+
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+         amd64) X86="x64"; X64="x86_64"; LBL="64bit" ;; \
+         arm64) X86="arm64"; X64="aarch64"; LBL="ARM64" ;; \
+       esac \
+    # gitleaks (uses x64/arm64)
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${X86}.tar.gz" \
+        | tar xz -C /usr/local/bin gitleaks \
+    # trufflehog
+    && curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin trufflehog \
+    # hadolint (single binary, suffix Linux-x86_64 / Linux-arm64)
+    && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-${X64}" \
+        -o /usr/local/bin/hadolint \
+    && chmod +x /usr/local/bin/hadolint \
+    # dockle (Linux-64bit / Linux-ARM64)
+    && curl -fsSL "https://github.com/goodwithtech/dockle/releases/download/v${DOCKLE_VERSION}/dockle_${DOCKLE_VERSION}_Linux-${LBL}.tar.gz" \
+        | tar xz -C /usr/local/bin dockle \
+    # syft (Anchore SBOM)
+    && curl -fsSL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin syft \
+    # grype (Anchore vuln)
+    && curl -fsSL "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin grype \
+    # osv-scanner (single binary)
+    && curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_${ARCH}" \
+        -o /usr/local/bin/osv-scanner \
+    && chmod +x /usr/local/bin/osv-scanner \
+    # gosec (Go SAST)
+    && curl -fsSL "https://github.com/securego/gosec/releases/download/v${GOSEC_VERSION}/gosec_${GOSEC_VERSION}_linux_${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin gosec \
+    # bearer (.deb release)
+    && curl -fsSL "https://github.com/Bearer/bearer/releases/download/v${BEARER_VERSION}/bearer_${BEARER_VERSION}_linux-${ARCH}.deb" \
+        -o /tmp/bearer.deb \
+    && (dpkg -i /tmp/bearer.deb || apt-get -f install -y --no-install-recommends) \
+    && rm /tmp/bearer.deb
+
+# === Layer sec-vscode: extensions useful for audit ============================
+RUN for ext in \
+        humao.rest-client \
+        timonwong.shellcheck \
+        ms-azuretools.vscode-docker \
+        usernamehw.errorlens \
+    ; do \
+        code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
+    done
+
+# === Layer sec-docker: Docker CLI (no daemon) =================================
+# Idempotent: when stacked on top of an image that already has docker keyring
+# (e.g. claudock-dev for the full variant), `gpg --dearmor -o file` would prompt
+# for confirmation. Redirect to stdout instead.
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor > /etc/apt/keyrings/docker.gpg \
+    && chmod go+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Final cleanup ============================================================
+RUN rm -rf \
+        /root/.claude.json \
+        /root/.claude/backups \
+        /root/.claude/downloads \
+        /root/.cache/pip \
+        /root/.cache/pipx \
+        /root/.local/share/pipx/cache \
+        /root/.config/code-server/config.yaml \
+        /root/.local/share/code-server/logs \
+        /root/.local/share/code-server/CachedExtensionVSIXs \
+        /root/.bash_history \
+        /root/.zsh_history \
+        /tmp/* \
+        /var/tmp/* \
+        /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+    2>/dev/null || true
+
+WORKDIR /workspace

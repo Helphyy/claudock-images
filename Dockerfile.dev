@@ -1,0 +1,234 @@
+# claudock-dev: claudock-minimal extended with the language toolchains.
+# Python (uv, pipx, ipython, ruff, mypy), Node LTS + pnpm + bun, Go, Rust.
+# All-purpose dev image, no cloud or security tooling.
+ARG BASE_IMAGE=claudock-minimal:dev
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    GOPATH=/root/go \
+    PATH=/root/.cargo/bin:/root/go/bin:$PATH
+
+# === Layer dev-1: extra dev essentials (build, search, inspect, docs) =========
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        make \
+        cmake \
+        unzip \
+        # Search / data
+        fd-find \
+        bat \
+        shellcheck \
+        # System inspection
+        net-tools \
+        dnsutils \
+        iputils-ping \
+        lsof \
+        strace \
+        htop \
+        ncdu \
+        tmux \
+        nano \
+        tree \
+        # Docs
+        man-db \
+        tealdeer \
+        pandoc \
+        # Web/data
+        httpie \
+        direnv \
+    && rm -rf /var/lib/apt/lists/*
+
+# yq (single binary)
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" \
+        -o /usr/local/bin/yq \
+    && chmod +x /usr/local/bin/yq
+
+# === Layer dev-2: Python (system) + uv + pipx + ipython =======================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        pipx \
+        ipython3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv: ultra-fast Python installer
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv \
+    && mv /root/.local/bin/uvx /usr/local/bin/uvx \
+    && uv --version
+
+# === Layer dev-3: Node LTS + pnpm + bun =======================================
+ARG NODE_MAJOR=22
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --silent pnpm@latest typescript@latest
+
+# bun (fast JS runtime + bundler)
+RUN curl -fsSL https://bun.sh/install | bash \
+    && cp /root/.bun/bin/bun /usr/local/bin/bun \
+    && /usr/local/bin/bun --version
+
+# === Layer dev-4: Go ==========================================================
+ARG GO_VERSION=1.23.4
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+        | tar xz -C /usr/local \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+    && go version
+
+# === Layer dev-5: Rust toolchain (rustup, stable, common components) ==========
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+        --component clippy --component rustfmt --profile minimal \
+    && /root/.cargo/bin/rustc --version
+
+# === Layer dev-6: GitHub & GitLab CLIs ========================================
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GLAB_VERSION=1.62.0
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.deb" \
+        -o /tmp/glab.deb \
+    && (dpkg -i /tmp/glab.deb || apt-get -f install -y --no-install-recommends) \
+    && rm /tmp/glab.deb
+
+# === Layer dev-7: extra code-server extensions for dev ========================
+RUN for ext in \
+        ms-python.python \
+        ms-python.debugpy \
+        charliermarsh.ruff \
+        dbaeumer.vscode-eslint \
+        esbenp.prettier-vscode \
+        timonwong.shellcheck \
+        foxundermoon.shell-format \
+        davidanson.vscode-markdownlint \
+        streetsidesoftware.code-spell-checker \
+        redhat.vscode-yaml \
+        tamasfe.even-better-toml \
+        mhutchie.git-graph \
+        yzhang.markdown-all-in-one \
+        bierner.markdown-mermaid \
+        usernamehw.errorlens \
+        gruntfuggly.todo-tree \
+        aaron-bond.better-comments \
+        humao.rest-client \
+        mads-hartmann.bash-ide-vscode \
+        golang.go \
+        rust-lang.rust-analyzer \
+    ; do \
+        code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
+    done
+
+# === Layer dev-8: extras (debugger, modern git, runners, DB clients, langs) ===
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        # Debugger (C/C++/Go/Rust)
+        gdb \
+        # Modern git diff viewer
+        git-delta \
+        # Project command runner (modern make)
+        just \
+        # File watcher (auto-restart on change)
+        entr \
+        # Lua (configs neovim/helix, scripting)
+        lua5.4 \
+        # DB clients
+        postgresql-client \
+        default-mysql-client \
+        redis-tools \
+        sqlite3 \
+        # Java (LTS, headless: no Swing/AWT)
+        openjdk-21-jdk-headless \
+        # Ruby + bundler
+        ruby \
+        ruby-bundler \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Layer dev-9: binary releases (lazygit, crystal, zig, mise) ==============
+ARG LAZYGIT_VERSION=0.61.1
+ARG CRYSTAL_VERSION=1.20.0
+ARG ZIG_VERSION=0.16.0
+
+RUN ARCH_DEB=$(dpkg --print-architecture) \
+    && case "$ARCH_DEB" in \
+         amd64) LZG_ARCH="x86_64"  ; ZG_ARCH="x86_64"   ; CR_ARCH="linux-x86_64"  ;; \
+         arm64) LZG_ARCH="arm64"   ; ZG_ARCH="aarch64"  ; CR_ARCH="linux-aarch64" ;; \
+         *)     LZG_ARCH="$ARCH_DEB" ; ZG_ARCH="$ARCH_DEB" ; CR_ARCH="linux-$ARCH_DEB" ;; \
+       esac \
+    # lazygit (TUI git)
+    && curl -fsSL "https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}/lazygit_${LAZYGIT_VERSION}_Linux_${LZG_ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin lazygit \
+    && lazygit --version | head -1 \
+    # Crystal
+    && curl -fsSL "https://github.com/crystal-lang/crystal/releases/download/${CRYSTAL_VERSION}/crystal-${CRYSTAL_VERSION}-1-${CR_ARCH}.tar.gz" \
+        -o /tmp/crystal.tar.gz \
+    && mkdir -p /opt/crystal \
+    && tar xzf /tmp/crystal.tar.gz -C /opt/crystal --strip-components=1 \
+    && rm /tmp/crystal.tar.gz \
+    && ln -sf /opt/crystal/bin/crystal /usr/local/bin/crystal \
+    && ln -sf /opt/crystal/bin/shards /usr/local/bin/shards \
+    && crystal --version | head -1 \
+    # Zig (URL pattern is `zig-<arch>-linux-<ver>.tar.xz`)
+    && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+        -o /tmp/zig.tar.xz \
+    && mkdir -p /opt/zig \
+    && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 \
+    && rm /tmp/zig.tar.xz \
+    && ln -sf /opt/zig/zig /usr/local/bin/zig \
+    && zig version
+
+# mise (multi-version manager: pick exact Python/Node/Go versions per project)
+RUN curl -fsSL https://mise.run | sh \
+    && mv /root/.local/bin/mise /usr/local/bin/mise \
+    && mise --version
+
+# === Layer dev-docker: Docker CLI (no daemon) =================================
+# CLI only. Pair with `claudock start --docker` to talk to the host's daemon
+# via the bind-mounted /var/run/docker.sock.
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod go+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# === Final cleanup ============================================================
+RUN rm -rf \
+        /root/.claude.json \
+        /root/.claude/backups \
+        /root/.claude/downloads \
+        /root/.cache/pip \
+        /root/.cache/npm \
+        /root/.cache/go-build \
+        /root/.config/code-server/config.yaml \
+        /root/.local/share/code-server/logs \
+        /root/.local/share/code-server/CachedExtensionVSIXs \
+        /root/.bash_history \
+        /root/.zsh_history \
+        /tmp/* \
+        /var/tmp/* \
+        /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+    2>/dev/null || true
+
+WORKDIR /workspace

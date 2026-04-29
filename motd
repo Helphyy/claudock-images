@@ -1,0 +1,5 @@
+
+  \033[1;36m◆\033[0m claudock container
+  \033[2;37mworkspace : /workspace    auth : /root/.claude\033[0m
+  \033[2;37mtype '\033[0m\033[1mclaude\033[0m\033[2;37m' to start Claude Code\033[0m
+

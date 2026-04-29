@@ -1,0 +1,196 @@
+# claudock-data: claudock-minimal extended with the data-science / analytics
+# toolkit. JupyterLab, pandas/numpy/polars/duckdb, plotting, SQL clients, dbt.
+# No language toolchain other than Python; for Node/Go/Rust use claudock-dev.
+ARG BASE_IMAGE=claudock-minimal:dev
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# === Layer data-1: Python + system deps for compiled wheels =================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        pipx \
+        ipython3 \
+        build-essential \
+        pkg-config \
+        # numerical libs (BLAS/LAPACK for numpy/scipy/sklearn)
+        libopenblas-dev \
+        liblapack-dev \
+        gfortran \
+        # native libs handy in data work
+        libpq-dev \
+        libmariadb-dev \
+        libsqlite3-dev \
+        libhdf5-dev \
+        # data CLI tools
+        sqlite3 \
+        postgresql-client \
+        default-mysql-client \
+        redis-tools \
+        unzip \
+        # Tabular CLI / data wrangling
+        miller \
+        visidata \
+        datamash \
+        parallel \
+        # Plot rendering (sklearn trees, dbt docs, graphviz exports)
+        graphviz \
+        libgraphviz-dev \
+        # Geospatial native libs (T2)
+        libgeos-dev \
+        libproj-dev \
+        gdal-bin \
+        libgdal-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# DuckDB standalone CLI (REPL natif, indépendant de Python)
+RUN ARCH_DEB=$(dpkg --print-architecture) \
+    && case "$ARCH_DEB" in \
+         amd64) DUCK_ARCH="amd64"   ;; \
+         arm64) DUCK_ARCH="arm64"   ;; \
+         *)     DUCK_ARCH="$ARCH_DEB" ;; \
+       esac \
+    && curl -fsSL "https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-${DUCK_ARCH}.zip" \
+        -o /tmp/duckdb.zip \
+    && unzip -q /tmp/duckdb.zip -d /usr/local/bin \
+    && rm /tmp/duckdb.zip \
+    && chmod +x /usr/local/bin/duckdb \
+    && duckdb --version
+
+# Quarto (Posit) : génère reports/sites depuis .ipynb / .qmd
+ARG QUARTO_VERSION=1.6.42
+RUN ARCH_DEB=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${ARCH_DEB}.deb" \
+        -o /tmp/quarto.deb \
+    && (dpkg -i /tmp/quarto.deb || apt-get -f install -y --no-install-recommends) \
+    && rm /tmp/quarto.deb \
+    && quarto --version
+
+# uv: ultra-fast Python installer (10x pip)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && mv /root/.local/bin/uv /usr/local/bin/uv \
+    && mv /root/.local/bin/uvx /usr/local/bin/uvx
+
+# === Layer data-2: Jupyter + numerical / data stack (system venv) ============
+# We install everything into a dedicated venv at /opt/data-venv so it doesn't
+# pollute the system Python and survives `apt upgrade`.
+ENV DATA_VENV=/opt/data-venv \
+    PATH=/opt/data-venv/bin:$PATH
+
+RUN python3 -m venv $DATA_VENV \
+    && uv pip install --python $DATA_VENV/bin/python --no-cache \
+        # Core
+        numpy \
+        pandas \
+        polars \
+        scipy \
+        # ML
+        scikit-learn \
+        # Plotting
+        matplotlib \
+        seaborn \
+        plotly \
+        # I/O / formats
+        pyarrow \
+        openpyxl \
+        xlrd \
+        # SQL engines / DBs
+        duckdb \
+        sqlalchemy \
+        psycopg[binary] \
+        pymysql \
+        # CLI REPLs with autocompletion
+        pgcli \
+        mycli \
+        litecli \
+        # Data wrangling helpers
+        csvkit \
+        # Notebook stack
+        jupyterlab \
+        ipykernel \
+        notebook \
+        jupyter-server \
+        # SQL linting / dbt-core + adapters (duckdb, postgres)
+        sqlfluff \
+        dbt-core \
+        dbt-duckdb \
+        dbt-postgres \
+        # Notebook quality of life
+        jupytext \
+        nbstripout \
+        papermill \
+        nbqa \
+        ipywidgets \
+        # Jupyter Lab git + LSP integration
+        jupyterlab-git \
+        jupyterlab-lsp \
+        'python-lsp-server[all]' \
+        # Cross-backend SQL + data validation
+        'ibis-framework[duckdb,sqlite,postgres]' \
+        great-expectations \
+        # Classic ML / stats not yet present
+        xgboost \
+        lightgbm \
+        statsmodels \
+        # Interactive viz (complements plotly)
+        bokeh \
+        altair \
+        hvplot \
+        # HDF5 binding (libhdf5-dev already installed)
+        h5py \
+        # Geospatial (T2, libgeos/libproj/gdal already installed)
+        geopandas \
+        shapely \
+        folium \
+        pyproj \
+        # NLP (T2)
+        spacy
+
+# spaCy models (EN small + FR small, ~50 MB total)
+RUN $DATA_VENV/bin/python -m spacy download en_core_web_sm \
+    && $DATA_VENV/bin/python -m spacy download fr_core_news_sm
+
+# Register the data venv as a kernel so Jupyter sees it
+RUN $DATA_VENV/bin/python -m ipykernel install --sys-prefix --name claudock-data \
+        --display-name "Python (claudock-data)"
+
+# === Layer data-vscode: code-server extensions ==============================
+RUN for ext in \
+        ms-toolsai.jupyter \
+        ms-toolsai.jupyter-keymap \
+        ms-toolsai.jupyter-renderers \
+        ms-toolsai.vscode-jupyter-cell-tags \
+        ms-toolsai.vscode-jupyter-slideshow \
+        ms-python.python \
+        ms-python.debugpy \
+        charliermarsh.ruff \
+        mechatroner.rainbow-csv \
+        redhat.vscode-yaml \
+        quarto.quarto \
+        randomfractalsinc.vscode-data-preview \
+    ; do \
+        code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
+    done
+
+# === Final cleanup ===========================================================
+RUN rm -rf \
+        /root/.claude.json \
+        /root/.claude/backups \
+        /root/.claude/downloads \
+        /root/.cache/pip \
+        /root/.cache/uv \
+        /opt/data-venv/share/jupyter/lab/staging \
+        /root/.config/code-server/config.yaml \
+        /root/.local/share/code-server/logs \
+        /root/.local/share/code-server/CachedExtensionVSIXs \
+        /root/.bash_history \
+        /root/.zsh_history \
+        /tmp/* \
+        /var/tmp/* \
+        /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+    2>/dev/null || true
+
+WORKDIR /workspace

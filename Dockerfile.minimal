@@ -1,0 +1,159 @@
+# claudock-minimal: small but useful base image to run Claude Code with a
+# VSCodium server and a real browser handy. All other variants extend this one.
+FROM debian:stable-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TZ=Etc/UTC \
+    HOME=/root \
+    SHELL=/bin/zsh \
+    PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Enable contrib + non-free so audit tools (nikto, sqlmap, etc.) are pullable.
+RUN sed -i 's|^Components: main$|Components: main contrib non-free non-free-firmware|' \
+        /etc/apt/sources.list.d/debian.sources
+
+# === Layer min-1: minimal system + shell + browsers ===========================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        # System essentials
+        ca-certificates \
+        curl \
+        wget \
+        gnupg \
+        sudo \
+        locales \
+        tzdata \
+        procps \
+        # Network / debug basics (ping, dig, ip, mtr, traceroute, nc, whois)
+        iputils-ping \
+        dnsutils \
+        iproute2 \
+        mtr-tiny \
+        netcat-openbsd \
+        traceroute \
+        whois \
+        ipcalc \
+        # Archive tools
+        unzip \
+        zip \
+        xz-utils \
+        zstd \
+        bzip2 \
+        # Docs (man pages)
+        man-db \
+        manpages \
+        # File ops
+        rsync \
+        tree \
+        # Shell
+        git \
+        openssh-client \
+        zsh \
+        bash-completion \
+        # Editing / inspect
+        vim \
+        hx \
+        nano \
+        less \
+        jq \
+        file \
+        bc \
+        psmisc \
+        tmux \
+        xclip \
+        # Minimal search
+        ripgrep \
+        fzf \
+        # Session recording
+        asciinema \
+        # X11 / browser libs
+        xauth \
+        libx11-6 \
+        libxext6 \
+        libxrender1 \
+        libxtst6 \
+        libxrandr2 \
+        libnss3 \
+        libgbm1 \
+        libasound2t64 \
+        # Browsers (firefox = for the human; chromium = for Claude / Playwright)
+        firefox-esr \
+        chromium \
+        chromium-driver \
+    && sed -i 's/^# *\(C.UTF-8\)/\1/' /etc/locale.gen \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# === Layer min-2: Claude Code (native binary) =================================
+RUN curl -fsSL https://claude.ai/install.sh | bash -s stable \
+    && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
+    && claude --version
+
+# === Layer min-2b: asn (nitefood/asn, comprehensive ASN/IP/BGP lookups) =====
+# Single bash script + relies on whois/dig/jq/curl/mtr/ipcalc (all in min-1).
+RUN curl -fsSL https://raw.githubusercontent.com/nitefood/asn/master/asn \
+        -o /usr/local/bin/asn \
+    && chmod +x /usr/local/bin/asn \
+    && asn --version 2>&1 | head -1 || true
+
+# === Layer min-3: oh-my-zsh + plugins + Powerlevel10k =========================
+RUN KEEP_ZSHRC=yes RUNZSH=no CHSH=no \
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" \
+    && git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions \
+        /root/.oh-my-zsh/custom/plugins/zsh-autosuggestions \
+    && git clone --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting \
+        /root/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting \
+    && git clone --depth 1 https://github.com/zsh-users/zsh-completions \
+        /root/.oh-my-zsh/custom/plugins/zsh-completions
+
+# === Layer min-4: code-server (FOSS VSCode) + minimal extension set ===========
+ARG CODE_SERVER_VERSION=4.96.4
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server_${CODE_SERVER_VERSION}_${ARCH}.deb" \
+        -o /tmp/code-server.deb \
+    && dpkg -i /tmp/code-server.deb \
+    && rm /tmp/code-server.deb
+
+RUN for ext in \
+        Anthropic.claude-code \
+        eamodio.gitlens \
+        editorconfig.editorconfig \
+        pkief.material-icon-theme \
+    ; do \
+        code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
+    done
+
+# === Layer min-5: rc + MOTD ===================================================
+COPY zshrc /root/.zshrc
+COPY motd /etc/claudock-motd
+
+RUN echo 'umask 002' > /etc/profile.d/claudock-umask.sh \
+    && chmod +x /etc/profile.d/claudock-umask.sh
+
+RUN mkdir -p /workspace /var/log/claudock-sessions \
+    && chsh -s /bin/zsh root
+
+# === Final cleanup: build-time identifiers / caches / autogen creds ===========
+RUN rm -rf \
+        /root/.claude.json \
+        /root/.claude/backups \
+        /root/.claude/downloads \
+        /root/.cache/claude \
+        /root/.cache/snowflake \
+        /root/.config/code-server/config.yaml \
+        /root/.local/share/code-server/logs \
+        /root/.local/share/code-server/CachedExtensionVSIXs \
+        /root/.bash_history \
+        /root/.zsh_history \
+        /tmp/* \
+        /var/tmp/* \
+        /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+    2>/dev/null || true
+
+WORKDIR /workspace
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD claude --version || exit 1
+
+CMD ["/bin/zsh", "-l"]

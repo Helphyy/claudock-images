@@ -1,0 +1,187 @@
+# claudock-doc: claudock-minimal extended with the documentation / publication
+# toolkit. LaTeX, pandoc, Hugo, mdBook, asciidoctor, imagemagick, spellcheck.
+# No language toolchains; for code projects pair with claudock-dev.
+ARG BASE_IMAGE=claudock-minimal:dev
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# === Layer doc-1: LaTeX, pandoc, asciidoctor, image / spell tools ============
+# Medium texlive set: enough for academic / technical writing without bringing
+# the full ~5 GB texlive-full. Add `apt install texlive-XXX` later if needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        # LaTeX (medium)
+        texlive-latex-base \
+        texlive-latex-recommended \
+        texlive-latex-extra \
+        texlive-fonts-recommended \
+        texlive-fonts-extra \
+        texlive-xetex \
+        texlive-luatex \
+        texlive-lang-french \
+        texlive-lang-english \
+        # Bibliography styles, science packages, publisher templates
+        texlive-bibtex-extra \
+        texlive-science \
+        texlive-publishers \
+        cm-super \
+        latexmk \
+        texlive-extra-utils \
+        biber \
+        lmodern \
+        # Extra fonts (Unicode coverage + monospace)
+        fonts-noto \
+        fonts-firacode \
+        fonts-jetbrains-mono \
+        # Conversion engine (pandoc has native citeproc since 2.11)
+        pandoc \
+        # AsciiDoc + Ruby support
+        asciidoctor \
+        # Image processing / SVG / EPS
+        imagemagick \
+        librsvg2-bin \
+        ghostscript \
+        # Spell checkers (EN + FR)
+        aspell \
+        aspell-en \
+        aspell-fr \
+        hunspell \
+        hunspell-en-us \
+        hunspell-fr \
+        # Diagrams: graphviz + plantuml (UML/seq/state) + mscgen
+        graphviz \
+        plantuml \
+        mscgen \
+        # Bibliography
+        bibtool \
+        # Restore mtime from git (useful for SSG)
+        git-restore-mtime \
+        # Office formats high-quality conversion (T2)
+        libreoffice \
+        # Java runtime for LanguageTool (T2, installed from upstream below)
+        default-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# LanguageTool (advanced EN/FR grammar/style, server + CLI)
+ARG LANGUAGETOOL_VERSION=6.5
+RUN curl -fsSL "https://www.languagetool.org/download/LanguageTool-${LANGUAGETOOL_VERSION}.zip" \
+        -o /tmp/lt.zip \
+    && unzip -q /tmp/lt.zip -d /opt \
+    && mv "/opt/LanguageTool-${LANGUAGETOOL_VERSION}" /opt/languagetool \
+    && rm /tmp/lt.zip \
+    && printf '#!/bin/sh\nexec java -jar /opt/languagetool/languagetool-commandline.jar "$@"\n' \
+        > /usr/local/bin/languagetool \
+    && printf '#!/bin/sh\nexec java -cp /opt/languagetool/languagetool-server.jar org.languagetool.server.HTTPServer "$@"\n' \
+        > /usr/local/bin/languagetool-server \
+    && chmod +x /usr/local/bin/languagetool /usr/local/bin/languagetool-server \
+    && languagetool --version | head -1
+
+# === Layer doc-2: SSG + diagrams + linters (single binaries from GH) =========
+ARG HUGO_VERSION=0.137.1
+ARG MDBOOK_VERSION=0.4.40
+ARG D2_VERSION=0.6.9
+ARG VALE_VERSION=3.9.1
+ARG PANDOC_CROSSREF_VERSION=0.3.23a
+ARG MARP_VERSION=4.1.2
+ARG QUARTO_VERSION=1.6.42
+
+RUN ARCH_DEB=$(dpkg --print-architecture) \
+    && case "$ARCH_DEB" in \
+         amd64) HUGO_ARCH="amd64" ; MDBOOK_ARCH="x86_64-unknown-linux-gnu" ; D2_ARCH="amd64" ; VALE_ARCH="64-bit" ; PCR_ARCH="X64"   ;; \
+         arm64) HUGO_ARCH="arm64" ; MDBOOK_ARCH="aarch64-unknown-linux-gnu" ; D2_ARCH="arm64" ; VALE_ARCH="arm64"  ; PCR_ARCH="ARM64" ;; \
+         *)     HUGO_ARCH="$ARCH_DEB" ; MDBOOK_ARCH="$ARCH_DEB" ; D2_ARCH="$ARCH_DEB" ; VALE_ARCH="$ARCH_DEB" ; PCR_ARCH="$ARCH_DEB" ;; \
+       esac \
+    # Hugo (SSG)
+    && curl -fsSL "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-${HUGO_ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin hugo \
+    # mdBook (Rust book)
+    && curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-${MDBOOK_ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin mdbook \
+    # d2 (Terrastruct, modern diagrams)
+    && curl -fsSL "https://github.com/terrastruct/d2/releases/download/v${D2_VERSION}/d2-v${D2_VERSION}-linux-${D2_ARCH}.tar.gz" \
+        -o /tmp/d2.tar.gz \
+    && mkdir -p /tmp/d2 && tar xzf /tmp/d2.tar.gz -C /tmp/d2 --strip-components=1 \
+    && cp /tmp/d2/bin/d2 /usr/local/bin/d2 && rm -rf /tmp/d2 /tmp/d2.tar.gz \
+    # vale (modern prose linter)
+    && curl -fsSL "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_${VALE_ARCH}.tar.gz" \
+        -o /tmp/vale.tar.gz \
+    && tar xzf /tmp/vale.tar.gz -C /usr/local/bin vale \
+    && rm /tmp/vale.tar.gz \
+    # pandoc-crossref (figure/table/equation cross-refs)
+    && curl -fsSL "https://github.com/lierdakil/pandoc-crossref/releases/download/v${PANDOC_CROSSREF_VERSION}/pandoc-crossref-Linux-${PCR_ARCH}.tar.xz" \
+        -o /tmp/pcr.tar.xz \
+    && tar xJf /tmp/pcr.tar.xz -C /usr/local/bin pandoc-crossref \
+    && rm /tmp/pcr.tar.xz \
+    # marp-cli (Markdown -> slides)
+    && curl -fsSL "https://github.com/marp-team/marp-cli/releases/download/v${MARP_VERSION}/marp-cli-v${MARP_VERSION}-linux.tar.gz" \
+        -o /tmp/marp.tar.gz \
+    && tar xzf /tmp/marp.tar.gz -C /usr/local/bin marp \
+    && rm /tmp/marp.tar.gz \
+    # Quarto (.qmd / .ipynb publishing)
+    && curl -fsSL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${ARCH_DEB}.deb" \
+        -o /tmp/quarto.deb \
+    && (dpkg -i /tmp/quarto.deb || apt-get -f install -y --no-install-recommends) \
+    && rm /tmp/quarto.deb \
+    && hugo version | head -1 \
+    && mdbook --version \
+    && d2 --version \
+    && vale --version \
+    && pandoc-crossref --version | head -1 \
+    && marp --version \
+    && quarto --version
+
+# === Layer doc-3: handy Python CLIs (rst2pdf etc.) ===========================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        pipx \
+    && rm -rf /var/lib/apt/lists/* \
+    && pipx install rst2pdf || true \
+    && pipx install proselint || true \
+    && pipx install mkdocs || true \
+    && pipx inject mkdocs mkdocs-material mkdocs-material-extensions \
+        mkdocs-git-revision-date-localized-plugin \
+        mkdocs-minify-plugin || true \
+    && pipx install sphinx || true \
+    && pipx inject sphinx myst-parser sphinx-rtd-theme furo \
+        sphinx-autobuild sphinx-copybutton || true
+
+# === Layer doc-vscode: code-server extensions ================================
+RUN for ext in \
+        james-yu.latex-workshop \
+        yzhang.markdown-all-in-one \
+        bierner.markdown-mermaid \
+        davidanson.vscode-markdownlint \
+        shd101wyy.markdown-preview-enhanced \
+        streetsidesoftware.code-spell-checker \
+        valentjn.vscode-ltex \
+        asciidoctor.asciidoctor-vscode \
+        bierner.markdown-preview-github-styles \
+        jebbs.plantuml \
+        quarto.quarto \
+        marp-team.marp-vscode \
+        errata-ai.vale-server \
+    ; do \
+        code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
+    done
+
+# === Final cleanup ===========================================================
+RUN rm -rf \
+        /root/.claude.json \
+        /root/.claude/backups \
+        /root/.claude/downloads \
+        /root/.cache/pip \
+        /root/.cache/pipx \
+        /root/.local/share/pipx/cache \
+        /root/.config/code-server/config.yaml \
+        /root/.local/share/code-server/logs \
+        /root/.local/share/code-server/CachedExtensionVSIXs \
+        /root/.bash_history \
+        /root/.zsh_history \
+        /tmp/* \
+        /var/tmp/* \
+        /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+    2>/dev/null || true
+
+WORKDIR /workspace
