@@ -62,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         psmisc \
         tmux \
         xclip \
+        wl-clipboard \
         # Minimal search
         ripgrep \
         fzf \
