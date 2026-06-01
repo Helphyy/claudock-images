@@ -1,39 +1,38 @@
 # claudock-images
 
-> Turnkey Docker images to run [Claude Code](https://docs.claude.com/en/docs/claude-code) in a secure, containerized environment.
+> Single light Docker image to run [Claude Code](https://docs.claude.com/en/docs/claude-code) in a secure, containerized environment.
 
-Five flavors are published, all share the same hardened base, all ship a [code-server](https://github.com/coder/code-server) (FOSS VSCode) with the official `Anthropic.claude-code` extension preinstalled. Pick the one that fits your workload.
+One image, rebuilt by GitHub Actions every 2 days so Claude Code and base packages stay fresh.
 
-| Image | Use case | Includes | Approx. size |
-|---|---|---|---|
-| **`claudock-minimal`** | Run Claude Code with a real browser, nothing else | Claude + zsh/p10k + code-server + git + Firefox + Chromium | ~2.3 GB |
-| **`claudock-dev`** | Day-to-day software dev with Claude | minimal + Python (uv, pipx, ipython), Node 22 + pnpm + bun, Go, Rust, gh, glab, httpie, yq | ~4.8 GB |
-| **`claudock-cloud`** | Cloud / IaC / orchestration work | minimal + HashiCorp suite + Kubernetes (kubectl, helm, k9s, …) + AWS/GCP/Azure + OpenShift `oc` + Ansible | ~5.7 GB |
-| **`claudock-security`** | Code audit & light pentest with AI assistance | minimal + nmap, masscan, sqlmap, gobuster, ffuf, hashcat, john, hydra, gdb, radare2, binwalk, semgrep, … | ~4.4 GB |
-| **`claudock-full`** | The kitchen sink | dev + cloud + security combined | ~10 GB |
+Published at `ghcr.io/helphyy/claudock:latest`. Approx. size: ~2.3 GB.
 
-All variants are built on `debian:stable-slim`, run as `root` (so `apt install` works during a session), and share the same shell DX: zsh + Powerlevel10k + oh-my-zsh + autosuggestions + syntax-highlighting + completions, generous history, sensible aliases.
+Contents:
+- Claude Code (latest release) + zsh + Powerlevel10k + oh-my-zsh (autosuggestions, syntax highlighting, completions)
+- [code-server](https://github.com/coder/code-server) (FOSS VSCode) with the official `Anthropic.claude-code` extension preinstalled
+- Browsers: Firefox, Chromium (+ chromedriver for Playwright)
+- Git, OpenSSH client, rsync, tree, vim, helix, nano, less, jq, ripgrep, fzf, tmux, asciinema
+- Network tools: dig, mtr, traceroute, nc, whois, ipcalc, [asn](https://github.com/nitefood/asn)
+- Clipboard forwarding: `xclip` (X11) + `wl-clipboard` (Wayland)
+- Built on `debian:stable-slim`, runs as `root` (so `apt install` works during a session), contrib + non-free enabled
+
+Need more (Python toolchain, cloud SDKs, pentest tools...)? Install on demand inside the container with `apt install ...` or `pipx install ...`, or build a project image with `FROM ghcr.io/helphyy/claudock:latest` and add what you need.
 
 ## Why this exists
 
-Running Claude Code directly on your host gives an AI agent unrestricted access to your filesystem, your shell history, your cloud credentials, your SSH keys. These images ship everything Claude needs **inside a Docker container** so you can:
+Running Claude Code directly on your host gives an AI agent unrestricted access to your filesystem, your shell history, your cloud credentials, your SSH keys. This image ships everything Claude needs **inside a Docker container** so you can:
 
 - Isolate Claude Code's blast radius from your host.
 - Keep one container per project, with its own auth and installed tools.
-- Get a "batteries included" dev environment ready in seconds.
+- Get a "batteries included" base environment ready in seconds.
 
-Pair them with the [Claudock wrapper](https://github.com/helphyy/claudock) for named persistent containers, multi-profile auth, project config, git clone on creation, X11 forwarding, code-server activation, and more.
+Pair it with the [Claudock wrapper](https://github.com/helphyy/claudock) for named persistent containers, multi-profile auth, project config, git clone on creation, X11 forwarding, code-server activation, and more.
 
 ## Quick start
 
-### Pull the variant you want
+### Pull
 
 ```bash
-docker pull ghcr.io/helphyy/claudock-minimal:latest
-docker pull ghcr.io/helphyy/claudock-dev:latest
-docker pull ghcr.io/helphyy/claudock-cloud:latest
-docker pull ghcr.io/helphyy/claudock-security:latest
-docker pull ghcr.io/helphyy/claudock-full:latest
+docker pull ghcr.io/helphyy/claudock:latest
 ```
 
 ### Run standalone (without the wrapper)
@@ -42,7 +41,7 @@ docker pull ghcr.io/helphyy/claudock-full:latest
 docker run -it --rm \
   -v "$HOME/.claudock-auth:/root/.claude" \
   -v "$PWD:/workspace" \
-  ghcr.io/helphyy/claudock-dev:latest
+  ghcr.io/helphyy/claudock:latest
 ```
 
 This:
@@ -70,37 +69,21 @@ claudock start my-project --cwd
 ```bash
 git clone https://github.com/helphyy/claudock-images.git
 cd claudock-images
-
-make build-minimal      # 2.3 GB
-make build-dev          # 4.8 GB (extends minimal)
-make build-cloud        # 5.7 GB (extends minimal)
-make build-security     # 4.4 GB (extends minimal)
-make build-full         # 10  GB (extends dev + cloud + security)
-make build-all          # all five
+make build    # tags claudock:latest locally
+make push     # tags + pushes to ghcr.io/helphyy/claudock (needs login)
 ```
 
 ## Tags
 
-Each variant is published on GHCR under `ghcr.io/helphyy/<name>`:
-
-- `latest`: current stable
-- `vX.Y.Z`: pinned versions
-- `dev`: built from `main`, may be unstable
+- `latest`: built from `main`, refreshed every 2 days by the scheduled workflow.
+- `YYYY-MM-DD`: dated snapshot of each scheduled build (for pinning).
 
 ## Security notes
 
-- Containers run as **root** by design (so `apt install` works during a session). Real isolation comes from the Docker container boundary.
+- The container runs as **root** by design (so `apt install` works during a session). Real isolation comes from the Docker container boundary.
 - Default Docker capability set; no `--privileged`, no Docker socket mounted.
 - Use `--security-opt=no-new-privileges` (the Claudock wrapper applies it automatically).
-- The `claudock-security` image ships offensive tooling. Use it **only on systems you are authorized to test**.
 - `--x11` (X server forwarding) lets a container observe/inject events on your host: only enable for trusted code.
-
-## Acknowledgements
-
-Image structure and variant taxonomy are heavily inspired by
-[Exegol](https://github.com/ThePorgs/Exegol). Many thanks to the Exegol team
-for the design patterns we re-used (single base image, layered variant
-inheritance, named persistent containers).
 
 ## License
 

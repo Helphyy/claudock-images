@@ -1,5 +1,6 @@
-# claudock-minimal: small but useful base image to run Claude Code with a
-# VSCodium server and a real browser handy. All other variants extend this one.
+# claudock: single light base image to run Claude Code with a VSCodium server,
+# a real browser, basic dev tooling and clipboard forwarding. Rebuilt every
+# 2 days by GitHub Actions to keep Claude Code and apt packages current.
 FROM debian:stable-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
