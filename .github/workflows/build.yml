@@ -10,7 +10,8 @@ on:
       - .github/workflows/build.yml
   schedule:
     # Every 2 days at 03:00 UTC. Picks up the latest Claude Code release
-    # and refreshed apt packages.
+    # and refreshed apt packages. The job skips the push if the rebuild
+    # is functionally identical to the current `latest` (see below).
     - cron: '0 3 */2 * *'
   workflow_dispatch: {}
 
@@ -37,23 +38,76 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute lowercased image name + date tag
+      - name: Compute image name + date tag
         id: meta
         run: |
           echo "image=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/claudock" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      # Build locally (no push yet). The cron path then compares the result
+      # with the current `latest` and skips the push if nothing changed.
+      - name: Build (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          push: true
+          push: false
+          load: true
           provenance: false
-          tags: |
-            ${{ steps.meta.outputs.image }}:latest
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.date }}
+          tags: claudock:candidate
           build-args: |
             CACHEBUST=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Fingerprint the candidate
+        id: fp_new
+        run: |
+          fp=$(docker run --rm claudock:candidate sh -c \
+            'claude --version; dpkg-query -W -f="${Package} ${Version}\n" | sort' \
+            | sha256sum | cut -d" " -f1)
+          echo "fingerprint=$fp" >> "$GITHUB_OUTPUT"
+          echo "candidate fingerprint: $fp"
+
+      # On schedule only: compare with the current `latest`. On push /
+      # workflow_dispatch we always publish (you changed something).
+      - name: Fingerprint the current latest
+        id: fp_old
+        if: github.event_name == 'schedule'
+        continue-on-error: true
+        run: |
+          if docker pull "${{ steps.meta.outputs.image }}:latest"; then
+            fp=$(docker run --rm "${{ steps.meta.outputs.image }}:latest" sh -c \
+              'claude --version; dpkg-query -W -f="${Package} ${Version}\n" | sort' \
+              | sha256sum | cut -d" " -f1)
+            echo "fingerprint=$fp" >> "$GITHUB_OUTPUT"
+            echo "latest fingerprint: $fp"
+          else
+            echo "no existing latest, will publish"
+            echo "fingerprint=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to push
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "reason=event=${{ github.event_name }} (always push)"
+          elif [ -z "${{ steps.fp_old.outputs.fingerprint }}" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "reason=no previous latest to compare against"
+          elif [ "${{ steps.fp_new.outputs.fingerprint }}" = "${{ steps.fp_old.outputs.fingerprint }}" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "reason=scheduled rebuild produced no functional change, skipping push"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "reason=scheduled rebuild differs from latest, publishing"
+          fi
+
+      - name: Tag and push
+        if: steps.decide.outputs.push == 'true'
+        run: |
+          docker tag claudock:candidate "${{ steps.meta.outputs.image }}:latest"
+          docker tag claudock:candidate "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.date }}"
+          docker push "${{ steps.meta.outputs.image }}:latest"
+          docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.date }}"
