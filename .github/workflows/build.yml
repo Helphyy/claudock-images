@@ -16,7 +16,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/claudock
 
 jobs:
   build:
@@ -38,9 +37,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute date tag
-        id: date
-        run: echo "tag=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Compute lowercased image name + date tag
+        id: meta
+        run: |
+          echo "image=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/claudock" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -50,8 +51,8 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.date.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.date }}
           build-args: |
             CACHEBUST=${{ github.run_id }}
           cache-from: type=gha
