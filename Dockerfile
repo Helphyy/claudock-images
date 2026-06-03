@@ -67,10 +67,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # Audio recording for Claude Code /voice dictation. claude-code falls
         # back to `rec` (sox) or `arecord` (alsa-utils) when its native module
         # can't load (the usual case in a container). libsox-fmt-pulse adds the
-        # PulseAudio/PipeWire backend (modern Linux desktops route through it).
+        # PulseAudio backend for sox; libasound2-plugins provides the ALSA
+        # pulse plugin so arecord routes through PulseAudio when the host
+        # socket is forwarded (combined with /etc/asound.conf below).
         sox \
         libsox-fmt-pulse \
         alsa-utils \
+        libasound2-plugins \
         # Minimal search
         ripgrep \
         fzf \
@@ -138,6 +141,12 @@ RUN for ext in \
     ; do \
         code-server --install-extension "$ext" || echo "WARN: $ext failed (continuing)" ; \
     done
+
+# Default ALSA to PulseAudio so arecord/rec route through the forwarded
+# host socket (set up by claudock --voice). Without this, ALSA tries
+# /dev/snd directly and either fails or captures silence while PipeWire
+# owns the device on the host side.
+RUN printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' > /etc/asound.conf
 
 # === Layer min-5: rc + MOTD ===================================================
 COPY zshrc /root/.zshrc
