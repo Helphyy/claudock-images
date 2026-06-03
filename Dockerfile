@@ -64,6 +64,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tmux \
         xclip \
         wl-clipboard \
+        # Audio recording for Claude Code /voice dictation. claude-code falls
+        # back to `rec` (sox) or `arecord` (alsa-utils) when its native module
+        # can't load (the usual case in a container). libsox-fmt-pulse adds the
+        # PulseAudio/PipeWire backend (modern Linux desktops route through it).
+        sox \
+        libsox-fmt-pulse \
+        alsa-utils \
         # Minimal search
         ripgrep \
         fzf \
